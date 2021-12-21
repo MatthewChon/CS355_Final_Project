@@ -5,7 +5,9 @@
 
 ## Requirements
 > Nodejs v16.4.2+
+> 
 > An application on the PetFinder API server
+> 
 > An application on the MapQuest API server
 
 ## API Used
