@@ -34,27 +34,37 @@ function connection_handler(req, res) {
     else if (req.url.startsWith("/search")) {
         const url = new URL(req.url, "https://localhost:3000");
         const pet_category = url.searchParams.get("category");
-        const user_location = {
-            streetaddress: url.searchParams.get("street-address"),
-            city:url.searchParams.get("city"),
-            state:url.searchParams.get("state"),
-            zipcode:url.searchParams.get("zipcode")
-        }
+        input_streetaddress = url.searchParams.get("street-address");
+        input_city = url.searchParams.get("city");
+        input_state = url.searchParams.get("state");
+        input_zipcode = url.searchParams.get("zipcode");
+        if (input_streetaddress != undefined && input_city != undefined && input_state != undefined && input_zipcode != undefined) {
+            const user_location = {
+                streetaddress: input_streetaddress,
+                city:input_city,
+                state:input_state,
+                zipcode:input_zipcode
+            }
 
-        const token_cache_file = './auth/petfinder-token.json';
-        let cache_valid = false;
-        if (fs.existsSync(token_cache_file)) {
-            cached_token_object = require(token_cache_file);
-            if (new Date(cached_token_object.expiration) > Date.now()) {
-                cache_valid = true;
+            const token_cache_file = './auth/petfinder-token.json';
+            let cache_valid = false;
+            if (fs.existsSync(token_cache_file)) {
+                cached_token_object = require(token_cache_file);
+                if (new Date(cached_token_object.expiration) > Date.now()) {
+                    cache_valid = true;
+                }
+            }
+            if (cache_valid) {
+                let access_token = cached_token_object.access_token;
+                create_search_request(access_token, pet_category, user_location, res);
+            }
+            else {
+                request_access_token(pet_category, user_location, res);
             }
         }
-        if (cache_valid) {
-            let access_token = cached_token_object.access_token;
-            create_search_request(access_token, pet_category, user_location, res);
-        }
         else {
-            request_access_token(pet_category, user_location, res);
+            res.writeHead(404, {"Content-Type":"text/plain"});
+            res.end(`Invalid Parameter`);
         }
     }
     else {
@@ -77,7 +87,10 @@ function request_access_token(pet_category, user_location, res) {
     const token_endpoint = "https://api.petfinder.com/v2/oauth2/token";
     const token_request_time = new Date();
     const token_request = https.request(token_endpoint, options);
-    token_request.once("error", send_error_message);
+    token_request.once("error", (err) => {
+        res.writeHead(404, {"Content-Type": "text/plain"});
+        res.end(`404 Not Found`);
+    });
     token_request.once("response", (token_stream) => stream_to_message(token_stream, received_token, token_request_time, pet_category, res));
     
     token_request.end(post_data);
@@ -116,11 +129,11 @@ function received_search_result(search_string, pet_category, user_location, res)
     const list_of_animals = search_object.animals.map(animal => animal);
 
     let animals = {animals_profile:[], max_size: list_of_animals.length};
-    list_of_animals.map((selected_animal) => process_information(selected_animal, animals, pet_category, user_location, res));
+    list_of_animals.map(selected_animal => process_information(selected_animal, animals, pet_category, user_location, res));
 }
 function process_information(selected_animal, animals, pet_category, user_location, res) {
     let animal_location = Object.values(selected_animal.contact.address).map(address => address).join(" ");
-    let img = `map-photos/${selected_animal.name.split(' ').join('')}-${animal_location.split(' ').join('')}.jpg`;
+    let img = `map-photos/${animal_location.split(' ').join('')}.jpg`;
     let animal_profile = {
         name: selected_animal.name,
         breed: selected_animal.breeds,
@@ -136,15 +149,11 @@ function process_information(selected_animal, animals, pet_category, user_locati
             download_map_photo(animal_profile, animals, pet_category, user_location, res);
         }
         else {
-            console.log("Image is Cached");
-            if (animals.animals_profile.length >= animals.max_size) {
-                generate_webpage(animals, pet_category, res);
-            }
+            load_map_direction(animal_profile, animals, pet_category, user_location, res);
         }
     });
 }
 function download_map_photo(selected_animal, animals, pet_category, user_location, res) {
-    console.log(selected_animal);
     const start_location = Object.values(user_location).map(address => address).join(" ");
     const search_query = querystring.stringify({
         key:api_key,
@@ -159,28 +168,52 @@ function download_map_photo(selected_animal, animals, pet_category, user_locatio
         const save_image = fs.createWriteStream(selected_animal.map_image, {'encoding': null});
         image_stream.pipe(save_image);
         save_image.on("finish", () => {
-            if (animals.animals_profile.length >= animals.max_size) {
-                generate_webpage(animals, pet_category, res);
-            }
+            load_map_direction(selected_animal, animals, pet_category, user_location, res);
         });
     });
     image_request.end(search_query);
 }
+function load_map_direction(selected_animal, animals, pet_category, user_location, res) {
+    const start_location = Object.values(user_location).map(address => address).join(" ");
+    const search_query = querystring.stringify({
+        key:api_key,
+        from: start_location,
+        to: selected_animal.address
+    });
+    const direction_endpoint = `http://www.mapquestapi.com/directions/v2/route?${search_query}`;
+    const direction_request = http.request(direction_endpoint, {method: "GET"});
+    direction_request.on("error", err => {
+        res.writeHead(404, {"Content-Type": "text/plain"});
+        res.end(`404 Not Found`);
+    });
+    direction_request.on("response", direction_stream => {stream_to_message(direction_stream, add_direction, selected_animal, animals, pet_category, res)});
+    direction_request.end();
+}
+function add_direction(direction_string, selected_animal, animals, pet_category, res) {
+    direction_object = JSON.parse(direction_string);
+    direction_array = direction_object.route.legs[0].maneuvers;
+    direction_transcript = direction_array.map(direction_object => direction_object.narrative).join("<br>");
+    selected_animal.direction = direction_transcript;
+    if (animals.animals_profile.length >= animals.max_size) {
+        generate_webpage(animals, pet_category, res);
+    }
+}
 function generate_webpage(animals, pet_category, res) {
     animal_profiles = animals.animals_profile;
     let info_component = animal_profiles.map(information => {
-        let structure = `<h3><a href="${information.url}">${information.name}</a></h3>
-        <p>Age: ${information.age}<br>
-        Gender: ${information.gender}<br>
-        `;
+        let structure = `<section style="border: 1px solid"><h3><a href="${information.url}">${information.name}</a></h3>
+        <p>
+        Age: ${information.age}<br>
+        Gender: ${information.gender}<br>`;
         if (information.breed.secondary != null) {
             structure += `Breed: ${information.breed.primary} / ${information.breed.secondary}<br>`;
         }
         else {
             structure += `Breed: ${information.breed.primary}<br>`;
         }
-        structure += `Address: ${information.address}<br>
-        <img src="${information.map_image}" /></p>`
+        structure += `Address: ${information.address}<br><img src="${information.map_image}" /></p>`;
+        /** Rendering issues where information is in object but outputs undefined **/
+        structure += `<p>${information.direction}</p></section>`
         return structure;
     }).join("");
     res.writeHead(200, {"Content-Type": "text/html"});
